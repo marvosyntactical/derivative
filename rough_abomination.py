@@ -7,7 +7,7 @@
 MODULAR DESIGN (v2 – now with training loop)
 ===========================================
 This file now covers three pillars:
-    1.  Model core (unchanged): kernel mixture → affine Riccati → FFT pricer;
+    1.  Model core : kernel mixture → affine Riccati → FFT pricer;
         Hawkes–SLV–impact Monte‑Carlo for path generation.
     2.  **Calibration loop**: global CMA‑ES warm‑start + Adam fine‑tune.
     3.  **RL hedging boilerplate**: minimal actor–critic training loop
@@ -22,7 +22,7 @@ Quick start (Linux + CUDA):
 Real data pipeline outline is at the bottom of the file (# 9).
 """
 ################################################################################
-# 1 ▸ Imports & global utilities (unchanged)
+# 1 ▸ Imports & global utilities 
 ################################################################################
 from __future__ import annotations
 import jax, jax.numpy as jnp, jax.random as jrd
@@ -43,7 +43,7 @@ try:
 except ImportError:
     gym = None  # RL part will complain politely
 ################################################################################
-# 2 ▸ Kernel approximation – exponential mixture (unchanged)
+# 2 ▸ Kernel approximation – exponential mixture 
 ################################################################################
 class KernelMix(NamedTuple):
     weights: jnp.ndarray  # shape (M,)
@@ -66,7 +66,7 @@ def fit_mixture(H: float, M: int = 10, T_max: float = 1.0, lam_ratio: float = 1e
     w = w / jnp.sum(w) * jnp.sum(K) / jnp.sum(A @ w)
     return KernelMix(w, lam)
 ################################################################################
-# 3 ▸ Riccati ODE (affine Volterra – after Markovianisation) (unchanged)
+# 3 ▸ Riccati ODE (affine Volterra – after Markovianisation) 
 ################################################################################
 class RHParams(NamedTuple):
     kappa: float
@@ -88,29 +88,52 @@ def riccati_rhs(t, y, args, *, backend="c64"):
     return jnp.concatenate((jnp.array([phi_dot]), psi_dot))
 
 
+# def solve_riccati(u: complex, T: float, p: RHParams):
+#     w, lam = p.mix
+#     args = (p.kappa, p.theta, p.xi, p.rho, w, lam)
+#     y0 = jnp.concatenate((jnp.array([0.0 + 0.0j]), jnp.zeros_like(w)))
+#     term = dfx.diffeqsolve(
+#         dfx.ODETerm(lambda t, y, args: riccati_rhs(t, y, args)),
+#         solver=dfx.Dopri5(dtype=jnp.complex64),
+#         t0=0.0,
+#         t1=T,
+#         dt0=1e-3,
+#         y0=y0,
+#         args=args,
+#     )
+#     phi_T = term.ys[0]
+#     psi_T = term.ys[1:]
+#     log_cf = 1j * u * 0.0 + phi_T + (psi_T * p.v0 * w).sum()
+#     return jnp.exp(log_cf)
+
+
 def solve_riccati(u: complex, T: float, p: RHParams):
     w, lam = p.mix
     args = (p.kappa, p.theta, p.xi, p.rho, w, lam)
-    y0 = jnp.concatenate((jnp.array([0.0 + 0.0j]), jnp.zeros_like(w)))
-    term = dfx.diffeqsolve(
-        dfx.ODETerm(lambda t, y, args: riccati_rhs(t, y, args)),
-        solver=dfx.Dopri5(),
-        t0=0.0,
-        t1=T,
-        dt0=1e-3,
+
+    y0   = jnp.concatenate((jnp.array([0+0j]), jnp.zeros_like(w)))
+
+    term = dfx.ODETerm(_riccati_rhs)
+    solver = dfx.Dopri5(dtype=jnp.complex64)
+
+    sol = dfx.diffeqsolve(term, solver,
+        t0=0.0, t1=T, dt0=1e-3,
         y0=y0,
-        args=args,
+        args=args
     )
-    phi_T = term.ys[0]
-    psi_T = term.ys[1:]
-    log_cf = 1j * u * 0.0 + phi_T + (psi_T * p.v0 * w).sum()
+
+    phi_T, psi_T = sol.ys[0], sol.ys[1:]
+    log_cf = 1j*u*0.0 + phi_T + (psi_T * p.v0 * w).sum()
     return jnp.exp(log_cf)
+
+
+
 ################################################################################
-# 4 ▸ Carr–Madan FFT pricer (unchanged)
+# 4 ▸ Carr–Madan FFT pricer 
 ################################################################################
 @jit
 def price_via_fft(params: RHParams, T: float, strikes: jnp.ndarray, S0: float, alpha: float = 1.5):
-    N = 2 ** 12
+    N = 2 ** 9 # EATS MEMORY O(N) AND COMPILE TIME O(N log N)
     eta = 0.25
     u = jnp.arange(N) * eta
     cf = vmap(lambda uu: solve_riccati(uu - 1j * (alpha + 1), T, params))(u)
@@ -120,7 +143,7 @@ def price_via_fft(params: RHParams, T: float, strikes: jnp.ndarray, S0: float, a
     prices = jnp.exp(-alpha * k) / math.pi * fft[: strikes.size]
     return prices
 ################################################################################
-# 5 ▸ Monte-Carlo generator with Hawkes jumps, SLV, impact (unchanged)
+# 5 ▸ Monte-Carlo generator with Hawkes jumps, SLV, impact 
 ################################################################################
 class SimConfig(NamedTuple):
     T: float
@@ -157,7 +180,7 @@ def simulate_paths(key, params: RHParams, cfg: SimConfig, paths: int = 4096):
         S = S * jnp.exp(-cfg.gamma * Q * dt)
     return S, V
 ################################################################################
-# 6 ▸ Calibration objective and optimisation (unchanged)
+# 6 ▸ Calibration objective and optimisation 
 ################################################################################
 class CalibSettings(NamedTuple):
     strikes: jnp.ndarray
@@ -166,11 +189,12 @@ class CalibSettings(NamedTuple):
     S0: float
 
 @jit
-def objective(params_vec, settings: CalibSettings, mix: KernelMix):
+def _loss(params_vec, settings: CalibSettings, mix: KernelMix):
     p = RHParams(*params_vec, mix=mix)
     pred_prices = vmap(lambda T:
                        price_via_fft(p, T, settings.strikes, settings.S0))(settings.maturities)
     return ((pred_prices - settings.market_prices) ** 2).mean()
+
 
 
 def calibrate_jax(settings: CalibSettings, mix: KernelMix, seed=0,
@@ -181,6 +205,7 @@ def calibrate_jax(settings: CalibSettings, mix: KernelMix, seed=0,
         es = cma.CMAEvolutionStrategy((lb + ub) / 2, 0.3*(ub-lb).mean(), {'bounds':[lb.tolist(), ub.tolist()]})
         for _ in range(8):
             cand = es.ask()
+            # FIXME where does _loss come from ...? NOTE TODO
             losses = [float(_loss(jnp.array(x), settings, mix)) for x in cand]
             es.tell(cand, losses)
         params = jnp.array(es.best.xbounds)

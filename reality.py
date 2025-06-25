@@ -1,5 +1,6 @@
 import jax.numpy as jnp
 import yfinance as yf     # pip install yfinance
+import matplotlib.pyplot as plt
 from rough_abomination import (load_iv_surface_yf,      # already defined earlier
                                fit_mixture, CalibSettings,
                                calibrate_jax, price_fft, RHParams)
@@ -29,7 +30,6 @@ params_vec = calibrate_jax(settings, mix,
 p = RHParams(*params_vec, mix=mix)
 
 
-import matplotlib.pyplot as plt
 
 # model prices for that maturity
 fit_px = price_fft(p, maturities[0], strikes, S0)
